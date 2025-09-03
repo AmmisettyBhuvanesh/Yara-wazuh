@@ -1,4 +1,5 @@
 # Run as Administrator
+
 # --- Step 1: Wazuh Agent ---
 Write-Host "Installing Wazuh Agent..."
 $wazuhInstaller = "$env:TEMP\wazuh-agent.msi"
@@ -27,7 +28,6 @@ python -m pip install valhallaAPI
 
 # --- Step 5: YARA ---
 Write-Host "Downloading and extracting YARA..."
-# get latest YARA win64 asset dynamically
 $release = Invoke-RestMethod "https://api.github.com/repos/VirusTotal/yara/releases/latest"
 $asset = $release.assets | Where-Object { $_.name -match "win64.zip" } | Select-Object -First 1
 $yaraZip = "$env:TEMP\yara.zip"
@@ -53,7 +53,7 @@ try {
     Write-Host "Could not download YARA rules from $rulesUrl"
 }
 
-# --- Step 7: Create yara.bat (unchanged) ---
+# --- Step 7: Create yara.bat ---
 Write-Host "Creating yara.bat..."
 $yaraBat = @"
 @echo off
@@ -86,13 +86,13 @@ exit /b
 "@
 Set-Content -Path "C:\Program Files (x86)\ossec-agent\active-response\bin\yara.bat" -Value $yaraBat -Encoding ASCII -Force
 
-# --- Step 8: Add Downloads folder ---
+# --- Step 8: Add Downloads folder (wildcard for any user) ---
 Write-Host "Adding Downloads folder to ossec.conf..."
-$userName = $env:USERNAME
 $ossecConf = "C:\Program Files (x86)\ossec-agent\ossec.conf"
-$downloadsDir = "<directories realtime=`"yes`">C:\Users\$userName\Downloads</directories>"
-if (-not (Select-String -Path $ossecConf -Pattern "C:\\Users\\$userName\\Downloads" -Quiet)) {
-    (Get-Content $ossecConf) -replace "(?<=</directories>)", "`n$downloadsDir" | Set-Content $ossecConf
+$downloadsDir = '<directories realtime="yes">C:\Users\*\Downloads</directories>'
+if (-not (Select-String -Path $ossecConf -Pattern "C:\\Users\\.*\\Downloads" -Quiet)) {
+    (Get-Content $ossecConf) -replace "(?<=</directories>)", "`n$downloadsDir" |
+        Set-Content $ossecConf
 }
 
 # --- Step 9: Restart Wazuh Agent ---
