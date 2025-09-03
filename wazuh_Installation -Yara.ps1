@@ -5,7 +5,7 @@ $wazuhInstaller = "$env:TEMP\wazuh-agent.msi"
 Invoke-WebRequest -Uri "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.12.0-1.msi" -OutFile $wazuhInstaller
 Start-Process msiexec.exe -ArgumentList "/i `"$wazuhInstaller`" /q WAZUH_MANAGER='135.13.19.196' WAZUH_AGENT_GROUP='default'" -Wait
 
-# Step 2: Install Python (always)
+# Step 2: Install Python
 Write-Host "Installing Python..."
 $pythonInstaller = "$env:TEMP\python-installer.exe"
 Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.5/python-3.12.5-amd64.exe" -OutFile $pythonInstaller
@@ -17,27 +17,31 @@ $vcInstaller = "$env:TEMP\vc_redist.x64.exe"
 Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcInstaller
 & $vcInstaller /install /quiet /norestart
 
-# Step 4: Install valhallaAPI
+# Step 4: Install valhallaAPI via Python
 Write-Host "Installing valhallaAPI module..."
-pip install valhallaAPI
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip
+python -m pip install valhallaAPI
 
-# Step 5: Download & Extract YARA
+# Step 5: Download & Extract YARA dynamically
 Write-Host "Downloading and extracting YARA..."
 $yaraZip = "$env:TEMP\yara.zip"
-Invoke-WebRequest -Uri "https://github.com/VirusTotal/yara/releases/download/v4.2.3/yara-4.2.3-2029-win64.zip" -OutFile $yaraZip
-Expand-Archive $yaraZip -DestinationPath "$env:TEMP\yara" -Force
+Invoke-WebRequest -Uri "https://github.com/VirusTotal/yara/releases/download/v4.2.3/yara-v4.2.3-2029-win64.zip" -OutFile $yaraZip
+Expand-Archive -Path $yaraZip -DestinationPath "$env:TEMP\yara" -Force
 Remove-Item $yaraZip -Force
-New-Item -ItemType Directory -Force -Path "C:\Program Files (x86)\ossec-agent\active-response\bin\yara" | Out-Null
-Copy-Item "$env:TEMP\yara\v4.2.3-2029-win64\yara64.exe" "C:\Program Files (x86)\ossec-agent\active-response\bin\yara\" -Force
+$yaraExe = Get-ChildItem "$env:TEMP\yara" -Recurse -Filter "yara64.exe" | Select-Object -First 1
+if ($yaraExe) {
+    New-Item -ItemType Directory -Force -Path "C:\Program Files (x86)\ossec-agent\active-response\bin\yara" | Out-Null
+    Copy-Item $yaraExe.FullName "C:\Program Files (x86)\ossec-agent\active-response\bin\yara\yara64.exe" -Force
+} else {
+    Write-Host "YARA executable not found after extraction!"
+}
 
-# Step 6: Download yara rules python script from your GitHub and run it
-Write-Host "Downloading YARA rules Python script..."
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/<your-user>/<your-repo>/main/download_yara_rules.py" -OutFile "$env:TEMP\download_yara_rules.py"
-python "$env:TEMP\download_yara_rules.py"
-
-# Create rules directory and copy rules file
+# Step 6: Download YARA rules from your repo
+Write-Host "Downloading YARA rules..."
 New-Item -ItemType Directory -Force -Path "C:\Program Files (x86)\ossec-agent\active-response\bin\yara\rules" | Out-Null
-Copy-Item "yara_rules.yar" "C:\Program Files (x86)\ossec-agent\active-response\bin\yara\rules\" -Force
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/AmmisettyBhuvanesh/Yara-wazuh/main/yara_rules.yar" -OutFile "$env:TEMP\yara_rules.yar"
+Copy-Item "$env:TEMP\yara_rules.yar" "C:\Program Files (x86)\ossec-agent\active-response\bin\yara\rules\yara_rules.yar" -Force
 
 # Step 7: Create yara.bat
 Write-Host "Creating yara.bat..."
@@ -58,7 +62,7 @@ for /f "delims=" %%a in ('PowerShell -command "$logInput = Read-Host; Write-Outp
 set json_file_path="C:\Program Files (x86)\ossec-agent\active-response\stdin.txt"
 set syscheck_file_path=
 echo %input% > %json_file_path%
-for /F "tokens=* USEBACKQ" %%F in (\`Powershell -Nop -C "(Get-Content 'C:\Program Files (x86)\ossec-agent\active-response\stdin.txt'|ConvertFrom-Json).parameters.alert.syscheck.path"\`) do (
+for /F "tokens=* USEBACKQ" %%F in (`Powershell -Nop -C "(Get-Content 'C:\Program Files (x86)\ossec-agent\active-response\stdin.txt'|ConvertFrom-Json).parameters.alert.syscheck.path"`) do (
 set syscheck_file_path=%%F
 )
 del /f %json_file_path%
@@ -81,7 +85,7 @@ if (-not (Select-String -Path $ossecConf -Pattern "C:\\Users\\$userName\\Downloa
     (Get-Content $ossecConf) -replace "(?<=</directories>)", "`n$downloadsDir" | Set-Content $ossecConf
 }
 
-# Step 9: Restart Wazuh agent
+# Step 9: Restart Wazuh agent (service is WazuhSvc)
 Write-Host "Restarting Wazuh Agent..."
-Restart-Service -Name wazuh
+Restart-Service -Name WazuhSvc -Force
 Write-Host "All steps completed."
