@@ -11,8 +11,12 @@ Write-Host "Installing Python..."
 $pythonInstaller = "$env:TEMP\python-installer.exe"
 Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.5/python-3.12.5-amd64.exe" -OutFile $pythonInstaller
 & $pythonInstaller /quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1
-# reload PATH so we can use python immediately
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine")
+
+# Find python.exe reliably
+$pythonPath = (Get-ChildItem "C:\Program Files" -Directory -Filter "Python*" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1).FullName + "\python.exe"
+Write-Host "Using Python at $pythonPath"
 
 # --- Step 3: VC++ ---
 Write-Host "Installing VC++ Redistributable..."
@@ -22,16 +26,16 @@ Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile
 
 # --- Step 4: valhallaAPI ---
 Write-Host "Installing valhallaAPI..."
-python -m ensurepip --upgrade
-python -m pip install --upgrade pip
-python -m pip install valhallaAPI
+& $pythonPath -m ensurepip --upgrade
+& $pythonPath -m pip install --upgrade pip
+& $pythonPath -m pip install valhallaAPI
 
 # --- Step 5: YARA ---
 Write-Host "Downloading and extracting YARA..."
-$release = Invoke-RestMethod "https://api.github.com/repos/VirusTotal/yara/releases/latest"
-$asset = $release.assets | Where-Object { $_.name -match "win64.zip" } | Select-Object -First 1
+# Direct URL (example version 4.2.3)
+$yaraUrl = "https://github.com/VirusTotal/yara/releases/download/v4.2.3/yara-4.2.3-2029-win64.zip"
 $yaraZip = "$env:TEMP\yara.zip"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $yaraZip
+Invoke-WebRequest -Uri $yaraUrl -OutFile $yaraZip
 Expand-Archive -Path $yaraZip -DestinationPath "$env:TEMP\yara" -Force
 Remove-Item $yaraZip -Force
 $yaraExe = Get-ChildItem "$env:TEMP\yara" -Recurse -Filter "yara*.exe" | Select-Object -First 1
