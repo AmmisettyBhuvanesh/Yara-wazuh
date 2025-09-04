@@ -10,20 +10,29 @@ Start-Process msiexec.exe -ArgumentList "/i `"$wazuhInstaller`" /q WAZUH_MANAGER
 Write-Host "Installing Python..."
 $pythonInstaller = "$env:TEMP\python-installer.exe"
 Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.5/python-3.12.5-amd64.exe" -OutFile $pythonInstaller
-& $pythonInstaller /quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1
 
-# Find python.exe reliably
+### FIX: run installer and wait
+Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1" -Wait
+
+### FIX: poll for python.exe for up to 2 minutes
 $pythonPath = $null
-$pythonDir = Get-ChildItem "C:\Program Files" -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($pythonDir) { $pythonPath = Join-Path $pythonDir.FullName "python.exe" }
-if (-not $pythonPath -or -not (Test-Path $pythonPath)) {
-    $userPythonDir = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+$timeout = (Get-Date).AddMinutes(2)
+do {
+    $pythonDir = Get-ChildItem "C:\Program Files" -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
       Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($userPythonDir) { $pythonPath = Join-Path $userPythonDir.FullName "python.exe" }
-}
-if (-not $pythonPath -or -not (Test-Path $pythonPath)) {
-    throw "Could not locate python.exe after installation."
+    if ($pythonDir) { $pythonPath = Join-Path $pythonDir.FullName "python.exe" }
+
+    if (-not $pythonPath -or -not (Test-Path $pythonPath)) {
+        $userPythonDir = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+          Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($userPythonDir) { $pythonPath = Join-Path $userPythonDir.FullName "python.exe" }
+    }
+
+    if (-not $pythonPath -or -not (Test-Path $pythonPath)) { Start-Sleep -Seconds 5 }
+} until ((Test-Path $pythonPath) -or ((Get-Date) -gt $timeout))
+
+if (-not (Test-Path $pythonPath)) {
+    throw "Could not locate python.exe after installation (timeout)."
 }
 Write-Host "Using Python at $pythonPath"
 
@@ -62,7 +71,7 @@ if ($yaraExe) {
 
 # --- Step 6: YARA rules from your repo ---
 Write-Host "Downloading YARA rules..."
-$rulesUrl = "https://raw.githubusercontent.com/AmmisettyBhuvanesh/Yara-wazuh/main/yara_rules.yar" # make sure this is valid
+$rulesUrl = "https://raw.githubusercontent.com/AmmisettyBhuvanesh/Yara-wazuh/main/yara_rules.yar"
 $rulesDir = Join-Path $targetYaraDir "rules"
 New-Item -ItemType Directory -Force -Path $rulesDir | Out-Null
 try {
