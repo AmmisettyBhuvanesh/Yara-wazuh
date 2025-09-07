@@ -1,7 +1,7 @@
 # ===================== CONFIG (edit these 3 only if needed) =====================
 $WAZUH_MANAGER    = '135.13.19.196'         # <-- your Wazuh Manager IP/host
 $WAZUH_GROUP      = 'default'               # <-- agent group
-$VALHALLA_API_KEY = '1111111111111111111111111111111111111111111111111111111111111111' # <-- Valhalla API key (not 'demo')
+$VALHALLA_API_KEY = '<PUT_YOUR_API_KEY_HERE>' # <-- Valhalla API key (not 'demo')
 $SCHEDULE_HOUR    = 2                       # daily refresh at local 02:00
 # ===============================================================================
 
@@ -41,10 +41,27 @@ function Install-VCpp {
   Remove-Item $vc -Force
 }
 
-# --- YARA (Win64) ---
+# --- YARA (Win64) ---  AUTO-DETECT LATEST FROM GITHUB
 function Install-Yara {
   $zip = Join-Path $env:TEMP 'yara.zip'
-  $yaraUrl = 'https://github.com/VirusTotal/yara/releases/download/v4.3.1/yara-4.3.1-2468-win64.zip'
+
+  # Ask GitHub for the latest YARA release and pick a win64 asset
+  $releasesApi = 'https://api.github.com/repos/VirusTotal/yara/releases/latest'
+  $headers = @{ 'User-Agent' = 'PowerShell'; 'Accept' = 'application/vnd.github+json' }
+
+  Write-Host "Querying latest YARA release from GitHub..."
+  $latest = Invoke-RestMethod -Uri $releasesApi -Headers $headers
+
+  $asset = $latest.assets | Where-Object {
+    $_.name -match 'win64\.zip$'
+  } | Select-Object -First 1
+
+  if (-not $asset) {
+    throw "Couldn't find a win64 ZIP in latest YARA release (${($latest.tag_name)})."
+  }
+
+  $yaraUrl = $asset.browser_download_url
+  Write-Host "Downloading YARA: $($asset.name)"
   Download-File $yaraUrl $zip
 
   $tmp = Join-Path $env:TEMP 'yara_extracted'
@@ -52,25 +69,18 @@ function Install-Yara {
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
   Remove-Item $zip -Force
 
-  $yaraExe = Get-ChildItem $tmp -Recurse -Filter 'yara64.exe' | Select-Object -First 1
-  if (-not $yaraExe) {
-    $yaraExe = Get-ChildItem $tmp -Recurse -Filter 'yara.exe' | Where-Object { $_.FullName -notmatch 'yara32' } | Select-Object -First 1
-  }
+  # Most zips contain 'yara.exe' at some depth; grab the first match
+  $yaraExe = Get-ChildItem $tmp -Recurse -Filter 'yara.exe' | Select-Object -First 1
   if (-not $yaraExe) { throw "Could not locate YARA executable after extraction." }
 
   $base = "${env:ProgramFiles(x86)}\ossec-agent\active-response\bin\yara"
   New-Item -ItemType Directory -Force -Path $base | Out-Null
-
   Copy-Item $yaraExe.FullName (Join-Path $base 'yara64.exe') -Force
 
   $rulesDir = Join-Path $base 'rules'
   New-Item -ItemType Directory -Force -Path $rulesDir | Out-Null
 
-  return @{
-    YaraDir  = $base
-    RulesDir = $rulesDir
-    YaraExe  = (Join-Path $base 'yara64.exe')
-  }
+  return @{ YaraDir=$base; RulesDir=$rulesDir; YaraExe=(Join-Path $base 'yara64.exe') }
 }
 
 # --- yara.bat (active-response wrapper) ---
