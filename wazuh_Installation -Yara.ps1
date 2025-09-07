@@ -1,139 +1,262 @@
-# Requires: Run as Administrator
+# ===================== CONFIG (edit these 3 only if needed) =====================
+$WAZUH_MANAGER    = '135.13.19.196'         # <-- your Wazuh Manager IP/host
+$WAZUH_GROUP      = 'default'               # <-- agent group
+$VALHALLA_API_KEY = '1111111111111111111111111111111111111111111111111111111111111111' # <-- Valhalla API key (not 'demo')
+$SCHEDULE_HOUR    = 2                       # daily refresh at local 02:00
+# ===============================================================================
 
-# --- Step 1: Wazuh Agent ---
-Write-Host "Installing Wazuh Agent..."
-$wazuhInstaller = "$env:TEMP\wazuh-agent.msi"
-Invoke-WebRequest -Uri "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.12.0-1.msi" -OutFile $wazuhInstaller
-Start-Process msiexec.exe -ArgumentList "/i `"$wazuhInstaller`" /q WAZUH_MANAGER='135.13.19.196' WAZUH_AGENT_GROUP='default'" -Wait
-Remove-Item $wazuhInstaller -Force
-
-# --- Step 2: Python ---
-Write-Host "Installing Python..."
-$pythonInstaller = "$env:TEMP\python-installer.exe"
-Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.5/python-3.12.5-amd64.exe" -OutFile $pythonInstaller
-Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_launcher=1" -Wait
-Remove-Item $pythonInstaller -Force
-
-# Wait for python.exe to appear
-Write-Host "Checking Python installation..."
-$pythonPath = $null
-$timeout = (Get-Date).AddMinutes(2)
-do {
-    # System-wide
-    $pythonExe = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($pythonExe) { $pythonPath = $pythonExe.Source }
-
-    # User/local
-    if (-not $pythonPath) {
-        $userPythonDir = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
-          Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($userPythonDir) { $pythonPath = Join-Path $userPythonDir.FullName "python.exe" }
-    }
-
-    # py.exe fallback
-    if (-not $pythonPath) {
-        $pyExe = Get-Command py.exe -ErrorAction SilentlyContinue
-        if ($pyExe) { $pythonPath = $pyExe.Source }
-    }
-
-    if (-not $pythonPath -or -not (Test-Path $pythonPath)) { Start-Sleep -Seconds 5 }
-} until ((Test-Path $pythonPath) -or ((Get-Date) -gt $timeout))
-
-if (-not (Test-Path $pythonPath)) {
-    throw "Could not locate python.exe after installation (timeout)."
+# --- Safety ---
+$ErrorActionPreference = 'Stop'
+function Assert-Admin {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $p  = New-Object Security.Principal.WindowsPrincipal($id)
+  if (-not $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+    throw "Please run this script as Administrator."
+  }
 }
-Write-Host "Using Python at $pythonPath"
-
-# --- Step 3: VC++ ---
-Write-Host "Installing VC++ Redistributable..."
-$vcInstaller = "$env:TEMP\vc_redist.x64.exe"
-Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcInstaller
-Start-Process -FilePath $vcInstaller -ArgumentList "/install /quiet /norestart" -Wait
-Remove-Item $vcInstaller -Force
-
-# --- Step 4: valhallaAPI ---
-Write-Host "Installing valhallaAPI..."
-& $pythonPath -m ensurepip --upgrade
-& $pythonPath -m pip install --upgrade pip
-& $pythonPath -m pip install valhallaAPI
-
-# --- Step 5: YARA ---
-Write-Host "Downloading and extracting YARA..."
-$yaraUrl = "https://github.com/VirusTotal/yara/releases/download/v4.2.3/yara-4.2.3-2029-win64.zip"
-$yaraZip = "$env:TEMP\yara.zip"
-Invoke-WebRequest -Uri $yaraUrl -OutFile $yaraZip
-
-$yaraTempDir = "$env:TEMP\yara"
-if (Test-Path $yaraTempDir) { Remove-Item $yaraTempDir -Recurse -Force }
-Expand-Archive -Path $yaraZip -DestinationPath $yaraTempDir -Force
-Remove-Item $yaraZip -Force
-
-$yaraExe = Get-ChildItem $yaraTempDir -Recurse -Filter "yara*.exe" | Select-Object -First 1
-$targetYaraDir = "C:\Program Files (x86)\ossec-agent\active-response\bin\yara"
-if (-not (Test-Path $targetYaraDir)) { New-Item -ItemType Directory -Force -Path $targetYaraDir | Out-Null }
-if ($yaraExe) {
-    Copy-Item $yaraExe.FullName (Join-Path $targetYaraDir "yara64.exe") -Force
-    Write-Host "YARA copied to $targetYaraDir"
-} else {
-    Write-Warning "YARA executable not found after extraction!"
+function Enable-Tls12 {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+function Download-File($Url, $OutPath) {
+  Write-Host "Downloading: $Url"
+  Invoke-WebRequest -Uri $Url -OutFile $OutPath
 }
 
-# --- Step 6: YARA rules ---
-Write-Host "Downloading YARA rules..."
-$rulesUrl = "https://raw.githubusercontent.com/AmmisettyBhuvanesh/Yara-wazuh/main/yara_rules.yar"
-$rulesDir = Join-Path $targetYaraDir "rules"
-New-Item -ItemType Directory -Force -Path $rulesDir | Out-Null
-try {
-    $tempRules = Join-Path $env:TEMP "yara_rules.yar"
-    Invoke-WebRequest -Uri $rulesUrl -OutFile $tempRules -ErrorAction Stop
-    Copy-Item $tempRules (Join-Path $rulesDir "yara_rules.yar") -Force
-    Write-Host "YARA rules saved to $rulesDir"
-} catch {
-    Write-Warning "Could not download YARA rules from $rulesUrl"
+# --- Install Wazuh Agent ---
+function Install-WazuhAgent {
+  $msi = Join-Path $env:TEMP 'wazuh-agent.msi'
+  Download-File 'https://packages.wazuh.com/4.x/windows/wazuh-agent-4.12.0-1.msi' $msi
+  $args = "/i `"$msi`" /q WAZUH_MANAGER='$WAZUH_MANAGER' WAZUH_AGENT_GROUP='$WAZUH_GROUP'"
+  Write-Host "Installing Wazuh Agent..."
+  Start-Process msiexec.exe -ArgumentList $args -Wait
+  Remove-Item $msi -Force
 }
 
-# --- Step 7: Create yara.bat ---
-Write-Host "Creating yara.bat..."
-$yaraBatPath = "C:\Program Files (x86)\ossec-agent\active-response\bin\yara.bat"
-$yaraBat = @"
+# --- VC++ Redist (YARA dependency) ---
+function Install-VCpp {
+  $vc = Join-Path $env:TEMP 'vc_redist.x64.exe'
+  Download-File 'https://aka.ms/vs/17/release/vc_redist.x64.exe' $vc
+  Write-Host "Installing VC++ Redistributable..."
+  Start-Process -FilePath $vc -ArgumentList '/install /quiet /norestart' -Wait
+  Remove-Item $vc -Force
+}
+
+# --- YARA (Win64) ---
+function Install-Yara {
+  $zip = Join-Path $env:TEMP 'yara.zip'
+  $yaraUrl = 'https://github.com/VirusTotal/yara/releases/download/v4.3.1/yara-4.3.1-2468-win64.zip'
+  Download-File $yaraUrl $zip
+
+  $tmp = Join-Path $env:TEMP 'yara_extracted'
+  if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+  Expand-Archive -Path $zip -DestinationPath $tmp -Force
+  Remove-Item $zip -Force
+
+  $yaraExe = Get-ChildItem $tmp -Recurse -Filter 'yara64.exe' | Select-Object -First 1
+  if (-not $yaraExe) {
+    $yaraExe = Get-ChildItem $tmp -Recurse -Filter 'yara.exe' | Where-Object { $_.FullName -notmatch 'yara32' } | Select-Object -First 1
+  }
+  if (-not $yaraExe) { throw "Could not locate YARA executable after extraction." }
+
+  $base = "${env:ProgramFiles(x86)}\ossec-agent\active-response\bin\yara"
+  New-Item -ItemType Directory -Force -Path $base | Out-Null
+
+  Copy-Item $yaraExe.FullName (Join-Path $base 'yara64.exe') -Force
+
+  $rulesDir = Join-Path $base 'rules'
+  New-Item -ItemType Directory -Force -Path $rulesDir | Out-Null
+
+  return @{
+    YaraDir  = $base
+    RulesDir = $rulesDir
+    YaraExe  = (Join-Path $base 'yara64.exe')
+  }
+}
+
+# --- yara.bat (active-response wrapper) ---
+function Write-YaraBat {
+  param([Parameter(Mandatory=$true)][string]$YaraExePath)
+  $batPath = "${env:ProgramFiles(x86)}\ossec-agent\active-response\bin\yara.bat"
+  $bat = @"
 @echo off
-setlocal enableDelayedExpansion
+setlocal EnableDelayedExpansion
+
 reg Query "HKLM\Hardware\Description\System\CentralProcessor\0" | find /i "x86" > NUL && SET OS=32BIT || SET OS=64BIT
 if %OS%==32BIT (
-    SET log_file_path="%programfiles%\ossec-agent\active-response\active-responses.log"
+  set OSSEC="%programfiles%\ossec-agent"
+) else (
+  set OSSEC="%programfiles(x86)%\ossec-agent"
 )
-if %OS%==64BIT (
-    SET log_file_path="%programfiles(x86)%\ossec-agent\active-response\active-responses.log"
-)
-set json_file_path="%programfiles(x86)%\ossec-agent\active-response\stdin.txt"
+
+set log_file_path=%OSSEC%\active-response\active-responses.log
+set json_file_path=%OSSEC%\active-response\stdin.txt
+
 for /F "tokens=* USEBACKQ" %%F in (`Powershell -Nop -C "(Get-Content '%json_file_path%'|ConvertFrom-Json).parameters.alert.syscheck.path"`) do (
-set syscheck_file_path=%%F
+  set syscheck_file_path=%%F
 )
 del /f %json_file_path%
-set yara_exe_path="%programfiles(x86)%\ossec-agent\active-response\bin\yara\yara64.exe"
-set yara_rules_path="%programfiles(x86)%\ossec-agent\active-response\bin\yara\rules\yara_rules.yar"
-for /f "delims=" %%a in ('powershell -command "& \"%yara_exe_path%\" \"%yara_rules_path%\" \"%syscheck_file_path%\""') do (
-    echo wazuh-yara: INFO - Scan result: %%a >> %log_file_path%
-)
-exit /b
-"@
-Set-Content -Path $yaraBatPath -Value $yaraBat -Encoding ASCII -Force
 
-# --- Step 8: Add Downloads folder to ossec.conf ---
-Write-Host "Adding Downloads folder to ossec.conf..."
-$ossecConf = "C:\Program Files (x86)\ossec-agent\ossec.conf"
-if (Test-Path $ossecConf) {
-    $downloadsDir = '  <directories realtime="yes">C:\Users\*\Downloads</directories>'
-    if (-not (Select-String -Path $ossecConf -Pattern "C:\\Users\\.*\\Downloads" -Quiet)) {
-        (Get-Content $ossecConf) -replace "(?<=</directories>)", "`n$downloadsDir" |
-            Set-Content $ossecConf
-        Write-Host "Added Downloads directory to ossec.conf"
-    }
-} else {
-    Write-Warning "ossec.conf not found at $ossecConf"
+set yara_exe_path="$YaraExePath"
+set yara_rules_path=%OSSEC%\active-response\bin\yara\rules\yara_rules.yar
+
+if exist "%yara_rules_path%" (
+  for /f "delims=" %%a in ('powershell -command "& \"%yara_exe_path%\" \"%yara_rules_path%\" \"%syscheck_file_path%\""') do (
+    echo wazuh-yara: INFO - [valhalla] %%a >> %log_file_path%
+  )
+)
+
+exit /b 0
+"@
+  Set-Content -Path $batPath -Value $bat -Encoding ASCII -Force
 }
 
-# --- Step 9: Restart Wazuh Agent ---
-Write-Host "Restarting Wazuh Agent..."
-Restart-Service -Name WazuhSvc -Force
-Write-Host "All steps completed."
+# --- Add Downloads folder to FIM via XML ---
+function Ensure-FimDownloads {
+  $conf = "${env:ProgramFiles(x86)}\ossec-agent\ossec.conf"
+  if (-not (Test-Path $conf)) { throw "ossec.conf not found at $conf" }
+  [xml]$xml = Get-Content $conf
+
+  $syscheck = $xml.ossec_config.syscheck
+  if (-not $syscheck) {
+    $syscheck = $xml.CreateElement('syscheck')
+    $xml.ossec_config.AppendChild($syscheck) | Out-Null
+  }
+  $desired = 'C:\Users\*\Downloads'
+  $existing = @()
+  foreach ($node in $syscheck.SelectNodes('directories')) { $existing += $node.InnerText }
+
+  if ($existing -notcontains $desired) {
+    $node = $xml.CreateElement('directories')
+    $attr = $xml.CreateAttribute('realtime'); $attr.Value = 'yes'
+    $node.Attributes.Append($attr) | Out-Null
+    $node.InnerText = $desired
+    $syscheck.AppendChild($node) | Out-Null
+    $xml.Save($conf)
+    Write-Host "Added $desired to FIM (ossec.conf)."
+  } else {
+    Write-Host "FIM already contains $desired."
+  }
+}
+
+# --- Valhalla pull (no Python, POST in PS) ---
+function Download-ValhallaRules {
+  param([Parameter(Mandatory=$true)][string]$ApiKey, [Parameter(Mandatory=$true)][string]$OutFile)
+
+  $uri = 'https://valhalla.nextron-systems.com/api/v1/get'
+  $body = @{ demo = 'demo'; apikey = $ApiKey; format = 'text' }
+  Write-Host "Fetching latest YARA rules from Valhalla..."
+  $resp = Invoke-WebRequest -Uri $uri -Method POST -Body $body -ContentType 'application/x-www-form-urlencoded' -Headers @{
+    'Accept' = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    'Accept-Language' = 'en-US,en;q=0.5'
+    'Referer' = 'https://valhalla.nextron-systems.com/'
+    'DNT' = '1'
+    'Upgrade-Insecure-Requests' = '1'
+  }
+  if (-not $resp.Content -or $resp.Content.Trim().Length -eq 0) { throw "Valhalla response was empty." }
+  Set-Content -Path $OutFile -Value $resp.Content -Encoding UTF8
+}
+
+# --- Delete rule files older than N years (keeps main file) ---
+function Cleanup-OldRules {
+  param([Parameter(Mandatory=$true)][string]$RulesRoot, [int]$Years = 2)
+  $cutoff = (Get-Date).AddYears(-$Years)
+  $main = Join-Path $RulesRoot 'yara_rules.yar'
+  $candidates = Get-ChildItem $RulesRoot -Filter *.yar -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $main }
+  foreach ($f in $candidates) {
+    if ($f.LastWriteTime -lt $cutoff) {
+      try { Remove-Item $f.FullName -Force; Write-Host "Deleted old rule: $($f.Name)" }
+      catch { Write-Warning "Failed to delete $($f.FullName): $($_.Exception.Message)" }
+    }
+  }
+}
+
+# --- Scheduled Task: daily Valhalla refresh + cleanup ---
+function Register-RuleRefreshTask {
+  param(
+    [Parameter(Mandatory=$true)][string]$ApiKey,
+    [Parameter(Mandatory=$true)][string]$RulesPath,
+    [Parameter(Mandatory=$true)][string]$RulesRoot,
+    [int]$Hour = 2
+  )
+  $taskName = 'Wazuh_Yara_Rules_Refresh'
+  $refreshScriptPath = Join-Path $env:ProgramData 'Wazuh\refresh-yara-rules.ps1'
+  New-Item -ItemType Directory -Force -Path (Split-Path $refreshScriptPath) | Out-Null
+
+  $refreshScript = @"
+`$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+# Valhalla pull
+`$uri = 'https://valhalla.nextron-systems.com/api/v1/get'
+`$body = @{ demo='demo'; apikey='$VALHALLA_API_KEY'; format='text' }
+`$resp = Invoke-WebRequest -Uri `$uri -Method POST -Body `$body -ContentType 'application/x-www-form-urlencoded'
+if (-not `$resp.Content -or `$resp.Content.Trim().Length -eq 0) { throw 'Valhalla response empty' }
+Set-Content -Path '$RulesPath' -Value `$resp.Content -Encoding UTF8
+
+# Cleanup > 2 years (except main file)
+`$cutoff = (Get-Date).AddYears(-2)
+`$main = Join-Path '$RulesRoot' 'yara_rules.yar'
+`$cand = Get-ChildItem '$RulesRoot' -Filter *.yar -File -ErrorAction SilentlyContinue | Where-Object { `$_.FullName -ne `$main }
+foreach (`$f in `$cand) {
+  if (`$f.LastWriteTime -lt `$cutoff) {
+    try { Remove-Item `$f.FullName -Force } catch { Write-Warning "Cleanup failed: `$($_.Exception.Message)" }
+  }
+}
+
+# Optional: restart agent
+# Restart-Service -Name WazuhSvc -Force
+"@
+  Set-Content -Path $refreshScriptPath -Value $refreshScript -Encoding UTF8 -Force
+
+  $time = (Get-Date).Date.AddHours($Hour)
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$refreshScriptPath`""
+  $trigger = New-ScheduledTaskTrigger -Daily -At $time
+  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+  if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+  }
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal | Out-Null
+  Write-Host "Scheduled daily rule refresh task '$taskName' at $($time.ToShortTimeString())"
+}
+
+# ============================== MAIN ==========================================
+try {
+  if ([string]::IsNullOrWhiteSpace($VALHALLA_API_KEY) -or $VALHALLA_API_KEY -eq '<PUT_YOUR_API_KEY_HERE>') {
+    throw "VALHALLA_API_KEY is not set inside the script. Edit the script and place your real key."
+  }
+
+  Assert-Admin
+  Enable-Tls12
+
+  Install-WazuhAgent
+  Install-VCpp
+
+  $y = Install-Yara
+  Write-YaraBat -YaraExePath $y.YaraExe
+
+  # Initial Valhalla pull
+  $rulesFile = Join-Path $y.RulesDir 'yara_rules.yar'
+  Download-ValhallaRules -ApiKey $VALHALLA_API_KEY -OutFile $rulesFile
+  Write-Host "YARA rules saved: $rulesFile"
+
+  # Ensure FIM
+  Ensure-FimDownloads
+
+  # Initial cleanup (2 years)
+  Cleanup-OldRules -RulesRoot $y.RulesDir -Years 2
+
+  # Schedule daily refresh
+  Register-RuleRefreshTask -ApiKey $VALHALLA_API_KEY -RulesPath $rulesFile -RulesRoot $y.RulesDir -Hour $SCHEDULE_HOUR
+
+  # Restart agent
+  Write-Host "Restarting Wazuh Agent..."
+  Restart-Service -Name WazuhSvc -Force
+
+  Write-Host "`nAll steps completed successfully ✅"
+}
+catch {
+  Write-Error "FAILED: $($_.Exception.Message)"
+  exit 1
+}
+# ==============================================================================
