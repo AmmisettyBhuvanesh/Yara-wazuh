@@ -41,7 +41,7 @@ function Install-VCpp {
   Remove-Item $vc -Force
 }
 
-# --- YARA (Win64) ---  AUTO-DETECT LATEST FROM GITHUB
+# --- YARA (Win64) ---  AUTO-DETECT LATEST FROM GITHUB  (robust exe + dll copy)
 function Install-Yara {
   $zip = Join-Path $env:TEMP 'yara.zip'
 
@@ -69,14 +69,21 @@ function Install-Yara {
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
   Remove-Item $zip -Force
 
-  # Most zips contain 'yara.exe' at some depth; grab the first match
-  $yaraExe = Get-ChildItem $tmp -Recurse -Filter 'yara.exe' | Select-Object -First 1
+  # Find yara64.exe or yara.exe, prefer yara64.exe, then pick first match
+  $yaraExe = Get-ChildItem $tmp -Recurse -Include 'yara64.exe','yara.exe' -File |
+             Sort-Object Name -Descending | Select-Object -First 1
   if (-not $yaraExe) { throw "Could not locate YARA executable after extraction." }
 
-  $base = "${env:ProgramFiles(x86)}\ossec-agent\active-response\bin\yara"
+  $srcDir = $yaraExe.Directory.FullName   # grab dlls from same folder
+  $base   = "${env:ProgramFiles(x86)}\ossec-agent\active-response\bin\yara"
   New-Item -ItemType Directory -Force -Path $base | Out-Null
-  Copy-Item $yaraExe.FullName (Join-Path $base 'yara64.exe') -Force
 
+  # Copy EXE as yara64.exe (Wazuh wrapper expects that name), plus all DLLs from same folder
+  Copy-Item $yaraExe.FullName (Join-Path $base 'yara64.exe') -Force
+  Get-ChildItem $srcDir -Filter '*.dll' -File -ErrorAction SilentlyContinue |
+    ForEach-Object { Copy-Item $_.FullName $base -Force }
+
+  # Ensure rules dir exists
   $rulesDir = Join-Path $base 'rules'
   New-Item -ItemType Directory -Force -Path $rulesDir | Out-Null
 
@@ -270,4 +277,3 @@ catch {
   exit 1
 }
 # ==============================================================================
-
