@@ -1,7 +1,7 @@
 # ===================== CONFIG (edit these 3 only if needed) =====================
 $WAZUH_MANAGER    = '135.13.19.196'         # <-- your Wazuh Manager IP/host
 $WAZUH_GROUP      = 'default'               # <-- agent group
-$VALHALLA_API_KEY = '<PUT_YOUR_API_KEY_HERE>' # <-- Valhalla API key (not 'demo')
+$VALHALLA_API_KEY = '1111111111111111111111111111111111111111111111111111111111111111' # <-- Valhalla API key (not 'demo')
 $SCHEDULE_HOUR    = 2                       # daily refresh at local 02:00
 # ===============================================================================
 
@@ -270,3 +270,4 @@ catch {
   exit 1
 }
 # ==============================================================================
+
